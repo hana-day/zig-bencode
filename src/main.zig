@@ -52,8 +52,10 @@ const TokenStream = struct {
     fn nextInteger(self: *@This()) Error!?Token {
         if ((try self.readChar()) != 'i') return Error.InvalidInteger;
         const tok_begin = self.i;
+        var negative = false;
         if ((try self.peekChar()) == '-') {
             self.i += 1;
+            negative = true;
         }
         const digits_begin = self.i;
         while (self.i < self.slice.len) {
@@ -62,12 +64,12 @@ const TokenStream = struct {
                     self.i += 1;
                 },
                 'e' => {
-                    self.i += 1;
-                    const digits_count = self.i - digits_begin - 1;
-                    if (digits_count > 1 and self.slice[digits_begin] == '0') {
-                        return Error.InvalidInteger;
-                    }
+                    const digits_count = self.i - digits_begin;
                     if (digits_count == 0) return Error.InvalidInteger;
+                    if (self.slice[digits_begin] == '0') {
+                        if (negative or digits_count > 1) return Error.InvalidInteger;
+                    }
+                    self.i += 1;
                     return Token{ .Integer = .{
                         .i = tok_begin,
                         .count = self.i - tok_begin - 1,
@@ -123,5 +125,6 @@ test "parsing" {
     try testing.expectError(Error.InvalidInteger, parse(u8, "ie"));
     try testing.expectError(Error.InvalidInteger, parse(u8, "i01e"));
     try testing.expectError(Error.InvalidInteger, parse(i8, "i-e"));
+    try testing.expectError(Error.InvalidInteger, parse(i8, "i-0e"));
     try testing.expectError(Error.UnexpectedEnd, parse(u8, "i1"));
 }
