@@ -49,9 +49,8 @@ const TokenStream = struct {
         return self.slice[self.i];
     }
 
-    fn nextInteger(self: *@This()) Error!?Token {
-        if ((try self.readChar()) != 'i') return Error.InvalidInteger;
-        const tok_begin = self.i;
+    /// Read signed/unsigned integer until stop_char is detected.
+    fn readInteger(self: *@This(), comptime stop_char: u8) Error!void {
         var negative = false;
         if ((try self.peekChar()) == '-') {
             self.i += 1;
@@ -63,22 +62,29 @@ const TokenStream = struct {
                 '0'...'9' => {
                     self.i += 1;
                 },
-                'e' => {
+                stop_char => {
                     const digits_count = self.i - digits_begin;
                     if (digits_count == 0) return Error.InvalidInteger;
                     if (self.slice[digits_begin] == '0') {
                         if (negative or digits_count > 1) return Error.InvalidInteger;
                     }
-                    self.i += 1;
-                    return Token{ .Integer = .{
-                        .i = tok_begin,
-                        .count = self.i - tok_begin - 1,
-                    } };
+                    return;
                 },
                 else => return Error.InvalidInteger,
             }
         }
-        return null;
+        return Error.UnexpectedEnd;
+    }
+
+    fn nextInteger(self: *@This()) Error!?Token {
+        if ((try self.readChar()) != 'i') return Error.InvalidInteger;
+        const tok_begin = self.i;
+        try self.readInteger('e');
+        self.i += 1; // skip 'e'
+        return Token{ .Integer = .{
+            .i = tok_begin,
+            .count = self.i - tok_begin - 1,
+        } };
     }
 };
 
@@ -109,10 +115,12 @@ fn parse(comptime T: type, slice: []const u8) ParseError(T)!T {
 }
 
 test "tokenize" {
-    var ts = TokenStream.init("i1e");
-    const token = try ts.next();
-    try testing.expect(token.? == Token.Integer);
-    try testing.expectEqualStrings("1", token.?.Integer.slice(ts.slice));
+    {
+        var ts = TokenStream.init("i1e");
+        const token = try ts.next();
+        try testing.expect(token.? == Token.Integer);
+        try testing.expectEqualStrings("1", token.?.Integer.slice(ts.slice));
+    }
 }
 
 test "parsing" {
