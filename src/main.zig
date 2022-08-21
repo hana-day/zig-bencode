@@ -37,9 +37,25 @@ const TokenStream = struct {
         return null;
     }
 
-    pub fn nextInteger(self: *@This()) Error!?Token {
-        self.i += 1; // skip 'i'
-        const tok_i = self.i;
+    fn readChar(self: *@This()) Error!u8 {
+        if (self.i >= self.slice.len) return Error.UnexpectedEnd;
+        const c = self.slice[self.i];
+        self.i += 1;
+        return c;
+    }
+
+    fn peekChar(self: *@This()) Error!u8 {
+        if (self.i >= self.slice.len) return Error.UnexpectedEnd;
+        return self.slice[self.i];
+    }
+
+    fn nextInteger(self: *@This()) Error!?Token {
+        if ((try self.readChar()) != 'i') return Error.InvalidInteger;
+        const tok_begin = self.i;
+        if ((try self.peekChar()) == '-') {
+            self.i += 1;
+        }
+        const digits_begin = self.i;
         while (self.i < self.slice.len) {
             switch (self.slice[self.i]) {
                 '0'...'9' => {
@@ -47,12 +63,14 @@ const TokenStream = struct {
                 },
                 'e' => {
                     self.i += 1;
-                    const count = self.i - tok_i - 1;
-                    if (count > 1 and self.slice[tok_i] == '0') return Error.InvalidInteger;
-                    if (count == 0) return Error.InvalidInteger;
+                    const digits_count = self.i - digits_begin - 1;
+                    if (digits_count > 1 and self.slice[digits_begin] == '0') {
+                        return Error.InvalidInteger;
+                    }
+                    if (digits_count == 0) return Error.InvalidInteger;
                     return Token{ .Integer = .{
-                        .i = tok_i,
-                        .count = count,
+                        .i = tok_begin,
+                        .count = self.i - tok_begin - 1,
                     } };
                 },
                 else => return Error.InvalidInteger,
@@ -99,8 +117,11 @@ test "parsing" {
     try testing.expect(0 == (try parse(u8, "i0e")));
     try testing.expect(1 == (try parse(u8, "i1e")));
     try testing.expect(255 == (try parse(u8, "i255e")));
+    try testing.expect(-1 == (try parse(i8, "i-1e")));
+    try testing.expect(-127 == (try parse(i8, "i-127e")));
 
     try testing.expectError(Error.InvalidInteger, parse(u8, "ie"));
     try testing.expectError(Error.InvalidInteger, parse(u8, "i01e"));
+    try testing.expectError(Error.InvalidInteger, parse(i8, "i-e"));
     try testing.expectError(Error.UnexpectedEnd, parse(u8, "i1"));
 }
