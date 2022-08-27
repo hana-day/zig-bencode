@@ -16,6 +16,7 @@ const Error = InternalParseError || std.fmt.ParseIntError || std.mem.Allocator.E
 
 const Token = union(enum) {
     ListBegin,
+    DictionaryBegin,
     End,
     Integer: struct {
         i: usize,
@@ -57,6 +58,10 @@ const TokenStream = struct {
                 },
                 'l' => {
                     token = Token{ .ListBegin = .{} };
+                    self.i += 1;
+                },
+                'd' => {
+                    token = Token {.DictionaryBegin = .{}};
                     self.i += 1;
                 },
                 'e' => {
@@ -285,6 +290,13 @@ test "tokenize" {
         const token = try ts.next();
         try testing.expect(token.? == Token.Integer);
         try testing.expectEqualStrings("1", token.?.Integer.slice(ts.slice));
+        try testing.expect((try ts.next()).? == Token.End);
+    }
+    {
+        var ts = TokenStream.init("d3:bari1ee");
+        try testing.expect((try ts.next()).? == Token.DictionaryBegin);
+        try testing.expect((try ts.next()).? == Token.ByteString);
+        try testing.expect((try ts.next()).? == Token.Integer);
         try testing.expect((try ts.next()).? == Token.End);
     }
 }
