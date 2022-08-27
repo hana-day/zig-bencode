@@ -8,9 +8,13 @@ const Error = error{
     UnexpectedCharacter,
     UnexpectedToken,
     UnexpectedEnd,
+
+    AllocatorRequired,
 };
 
 const Token = union(enum) {
+    ListBegin,
+    End,
     Integer: struct {
         i: usize,
         count: usize,
@@ -40,14 +44,19 @@ const TokenStream = struct {
     }
 
     pub fn next(self: *@This()) Error!?Token {
+        var token: ?Token = null;
         if (self.i < self.slice.len) {
             switch (self.slice[self.i]) {
-                'i' => return self.nextInteger(),
-                '0'...'9' => return self.nextByteString(),
+                'i' => {
+                    token = try self.nextInteger();
+                },
+                '0'...'9' => {
+                    token = try self.nextByteString();
+                },
                 else => return Error.UnexpectedCharacter,
             }
         }
-        return null;
+        return token;
     }
 
     fn readChar(self: *@This()) Error!u8 {
@@ -128,16 +137,26 @@ fn ParseError(comptime T: type) type {
             return Error;
         },
         .Pointer => {
-            return Error;
+            return Error || std.mem.Allocator.Error;
         },
         else => return error{},
     }
     unreachable;
 }
 
-fn parse(comptime T: type, slice: []const u8) ParseError(T)!T {
+pub const ParseOptions = struct {
+    allocator: ?std.mem.Allocator = null,
+};
+
+fn parse(comptime T: type, slice: []const u8, options: ParseOptions) ParseError(T)!T {
     var ts = TokenStream.init(slice);
     const token = (try ts.next()) orelse return Error.UnexpectedEnd;
+    const r = try parseInternal(T, token, slice, options);
+    errdefer parseFree(T, r, options);
+    return r;
+}
+
+fn parseInternal(comptime T: type, token: Token, slice: []const u8, options: ParseOptions) ParseError(T)!T {
     switch (@typeInfo(T)) {
         .Int, .ComptimeInt => {
             switch (token) {
@@ -158,10 +177,63 @@ fn parse(comptime T: type, slice: []const u8) ParseError(T)!T {
                 else => return Error.UnexpectedToken,
             }
         },
+        .Pointer => |ptrInfo| {
+            const allocator = options.allocator orelse return Error.AllocatorRequired;
+            switch (ptrInfo.size) {
+                .Slice => {
+                    switch (token) {
+                        .ByteString => |byteStringToken| {
+                            if (ptrInfo.child != u8) return Error.UnexpectedToken;
+                            const source_slice = byteStringToken.slice(slice);
+                            const len = byteStringToken.count;
+                            const output = try allocator.alloc(u8, len + @boolToInt(ptrInfo.sentinel != null));
+                            errdefer allocator.free(output);
+                            std.mem.copy(u8, output, source_slice);
+                            if (ptrInfo.sentinel) |some| {
+                                const char = @ptrCast(*const u8, some).*;
+                                output[len] = char;
+                                return output[0..len :char];
+                            }
+
+                            return output;
+                        },
+                        else => return Error.UnexpectedToken,
+                    }
+                },
+                else => @compileError("Unable to parse into type '" ++ @typeName(T) ++ "'"),
+            }
+        },
 
         else => @compileError("Unable to parse into type '" ++ @typeName(T) ++ "'"),
     }
-    unreachable;
+}
+
+fn parseFree(comptime T: type, value: T, options: ParseOptions) void {
+    switch (@typeInfo(T)) {
+        .Int, .ComptimeInt => {},
+        .Array => |arrayInfo| {
+            for (value) |v| {
+                parseFree(arrayInfo.child, v, options);
+            }
+        },
+        .Pointer => |ptrInfo| {
+            const allocator = options.allocator orelse unreachable;
+            switch (ptrInfo.size) {
+                .One => {
+                    parseFree(ptrInfo.child, value.*, options);
+                    allocator.destroy(value);
+                },
+                .Slice => {
+                    for (value) |v| {
+                        parseFree(ptrInfo.child, v, options);
+                    }
+                    allocator.free(value);
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
 }
 
 test "tokenize" {
@@ -181,23 +253,28 @@ test "tokenize" {
 
 test "parsing" {
     {
-        try testing.expect(0 == (try parse(u8, "i0e")));
-        try testing.expect(1 == (try parse(u8, "i1e")));
-        try testing.expect(255 == (try parse(u8, "i255e")));
-        try testing.expect(-1 == (try parse(i8, "i-1e")));
-        try testing.expect(-127 == (try parse(i8, "i-127e")));
+        try testing.expect(0 == (try parse(u8, "i0e", .{})));
+        try testing.expect(1 == (try parse(u8, "i1e", .{})));
+        try testing.expect(255 == (try parse(u8, "i255e", .{})));
+        try testing.expect(-1 == (try parse(i8, "i-1e", .{})));
+        try testing.expect(-127 == (try parse(i8, "i-127e", .{})));
 
-        try testing.expectError(Error.InvalidInteger, parse(u8, "ie"));
-        try testing.expectError(Error.InvalidInteger, parse(u8, "i01e"));
-        try testing.expectError(Error.InvalidInteger, parse(i8, "i-e"));
-        try testing.expectError(Error.InvalidInteger, parse(i8, "i-0e"));
-        try testing.expectError(Error.UnexpectedEnd, parse(u8, "i1"));
+        try testing.expectError(Error.InvalidInteger, parse(u8, "ie", .{}));
+        try testing.expectError(Error.InvalidInteger, parse(u8, "i01e", .{}));
+        try testing.expectError(Error.InvalidInteger, parse(i8, "i-e", .{}));
+        try testing.expectError(Error.InvalidInteger, parse(i8, "i-0e", .{}));
+        try testing.expectError(Error.UnexpectedEnd, parse(u8, "i1", .{}));
     }
     {
-        try testing.expectEqual([0]u8{}, (try parse([0]u8, "0:")));
-        try testing.expectEqual([4]u8{ 's', 'p', 'a', 'm' }, (try parse([4]u8, "4:spam")));
+        try testing.expectEqual([0]u8{}, (try parse([0]u8, "0:", .{})));
+        try testing.expectEqual([4]u8{ 's', 'p', 'a', 'm' }, (try parse([4]u8, "4:spam", .{})));
 
-        try testing.expectError(Error.InvalidInteger, parse([4]u8, "01:spam"));
-        try testing.expectError(Error.UnexpectedEnd, parse([4]u8, "1:"));
+        try testing.expectError(Error.InvalidInteger, parse([4]u8, "01:spam", .{}));
+        try testing.expectError(Error.UnexpectedEnd, parse([4]u8, "1:", .{}));
+    }
+    {
+        const r = try parse([]const u8, "4:spam", .{ .allocator = testing.allocator });
+        defer testing.allocator.free(r);
+        try testing.expectEqualStrings("spam", r);
     }
 }
