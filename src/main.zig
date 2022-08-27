@@ -9,6 +9,8 @@ const InternalParseError = error{
     UnexpectedToken,
     UnexpectedEnd,
 
+    MissingField,
+
     AllocatorRequired,
 };
 
@@ -61,7 +63,7 @@ const TokenStream = struct {
                     self.i += 1;
                 },
                 'd' => {
-                    token = Token {.DictionaryBegin = .{}};
+                    token = Token{ .DictionaryBegin = .{} };
                     self.i += 1;
                 },
                 'e' => {
@@ -197,6 +199,48 @@ fn parseInternal(comptime T: type, token: Token, tokenStream: *TokenStream, slic
                 },
                 else => return Error.UnexpectedToken,
             }
+        },
+        .Struct => |structInfo| {
+            if (token != Token.DictionaryBegin) return Error.UnexpectedToken;
+            var r: T = undefined;
+            var fields_seen = [_]bool{false} ** structInfo.fields.len;
+            errdefer {
+                inline for (structInfo.fields) |field, i| {
+                    if (fields_seen[i]) {
+                        parseFree(field.field_type, @field(r, field.name), options);
+                    }
+                }
+            }
+            while (true) {
+                const tok = (try tokenStream.next()) orelse return Error.UnexpectedEnd;
+                switch (tok) {
+                    .End => break,
+                    .ByteString => |byteStringToken| {
+                        const key = byteStringToken.slice(slice);
+                        inline for (structInfo.fields) |field, i| {
+                            if (std.mem.eql(u8, field.name, key)) {
+                                const tok2 = (try tokenStream.next()) orelse return Error.UnexpectedEnd;
+                                @field(r, field.name) = try parseInternal(field.field_type, tok2, tokenStream, slice, options);
+                                fields_seen[i] = true;
+                            }
+                        }
+                    },
+                    else => return Error.UnexpectedToken,
+                }
+            }
+            inline for (structInfo.fields) |field, i| {
+                if (!fields_seen[i]) {
+                    if (field.default_value) |default_ptr| {
+                        if (!field.is_comptime) {
+                            const default = @ptrCast(*const field.field_type, default_ptr).*;
+                            @field(r, field.name) = default;
+                        }
+                    } else {
+                        return Error.MissingField;
+                    }
+                }
+            }
+            return r;
         },
         .Pointer => |ptrInfo| {
             const allocator = options.allocator orelse return Error.AllocatorRequired;
@@ -369,4 +413,35 @@ test "parsing invalid list" {
     try testing.expectError(Error.UnexpectedEnd, parse([2]u8, "l", .{}));
     try testing.expectError(Error.UnexpectedEnd, parse([2]u8, "li", .{}));
     try testing.expectError(Error.UnexpectedEnd, parse([2]u8, "li0ei255e", .{}));
+}
+
+test "parsing dictionary" {
+    {
+        const MyStruct = struct {
+            foo: u8,
+            bar: []const u8,
+            baz: []u8,
+        };
+        const r = try parse(MyStruct, "d3:bar4:spam3:fooi42e3:bazli1ei2eee", .{ .allocator = testing.allocator });
+        defer {
+            testing.allocator.free(r.bar);
+            testing.allocator.free(r.baz);
+        }
+        try testing.expectEqualStrings("spam", r.bar);
+        try testing.expect(42 == r.foo);
+        try testing.expect(2 == r.baz.len);
+        try testing.expect(1 == r.baz[0]);
+        try testing.expect(2 == r.baz[1]);
+    }
+}
+
+test "parsing invalid dictionary" {
+    const MyStruct = struct {
+        foo: u8,
+        bar: []const u8,
+        baz: []u8,
+    };
+    try testing.expectError(Error.UnexpectedEnd, parse(MyStruct, "d", .{ .allocator = testing.allocator }));
+    try testing.expectError(Error.UnexpectedEnd, parse(MyStruct, "d3:bar4:spam3:fooi42e3:bazli1ei2ee", .{ .allocator = testing.allocator }));
+    try testing.expectError(Error.MissingField, parse(MyStruct, "d3:fooi42e3:bazli1ei2eee", .{ .allocator = testing.allocator }));
 }
