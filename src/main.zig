@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const Error = error{
+const InternalParseError = error{
     InvalidInteger,
     InvalidByteString,
 
@@ -11,6 +11,8 @@ const Error = error{
 
     AllocatorRequired,
 };
+
+const Error = InternalParseError || std.fmt.ParseIntError || std.mem.Allocator.Error;
 
 const Token = union(enum) {
     ListBegin,
@@ -52,6 +54,14 @@ const TokenStream = struct {
                 },
                 '0'...'9' => {
                     token = try self.nextByteString();
+                },
+                'l' => {
+                    token = Token{ .ListBegin = .{} };
+                    self.i += 1;
+                },
+                'e' => {
+                    token = Token{ .End = .{} };
+                    self.i += 1;
                 },
                 else => return Error.UnexpectedCharacter,
             }
@@ -128,35 +138,19 @@ const TokenStream = struct {
     }
 };
 
-fn ParseError(comptime T: type) type {
-    switch (@typeInfo(T)) {
-        .Int, .ComptimeInt => {
-            return Error || std.fmt.ParseIntError;
-        },
-        .Array => {
-            return Error;
-        },
-        .Pointer => {
-            return Error || std.mem.Allocator.Error;
-        },
-        else => return error{},
-    }
-    unreachable;
-}
-
 pub const ParseOptions = struct {
     allocator: ?std.mem.Allocator = null,
 };
 
-fn parse(comptime T: type, slice: []const u8, options: ParseOptions) ParseError(T)!T {
-    var ts = TokenStream.init(slice);
-    const token = (try ts.next()) orelse return Error.UnexpectedEnd;
-    const r = try parseInternal(T, token, slice, options);
+fn parse(comptime T: type, slice: []const u8, options: ParseOptions) Error!T {
+    var tokenStream = TokenStream.init(slice);
+    const token = (try tokenStream.next()) orelse return Error.UnexpectedEnd;
+    const r = try parseInternal(T, token, &tokenStream, slice, options);
     errdefer parseFree(T, r, options);
     return r;
 }
 
-fn parseInternal(comptime T: type, token: Token, slice: []const u8, options: ParseOptions) ParseError(T)!T {
+fn parseInternal(comptime T: type, token: Token, tokenStream: *TokenStream, slice: []const u8, options: ParseOptions) Error!T {
     switch (@typeInfo(T)) {
         .Int, .ComptimeInt => {
             switch (token) {
@@ -189,13 +183,27 @@ fn parseInternal(comptime T: type, token: Token, slice: []const u8, options: Par
                             const output = try allocator.alloc(u8, len + @boolToInt(ptrInfo.sentinel != null));
                             errdefer allocator.free(output);
                             std.mem.copy(u8, output, source_slice);
-                            if (ptrInfo.sentinel) |some| {
-                                const char = @ptrCast(*const u8, some).*;
-                                output[len] = char;
-                                return output[0..len :char];
-                            }
-
                             return output;
+                        },
+                        .ListBegin => {
+                            var arraylist = std.ArrayList(ptrInfo.child).init(allocator);
+                            errdefer {
+                                while (arraylist.popOrNull()) |v| {
+                                    parseFree(ptrInfo.child, v, options);
+                                }
+                                arraylist.deinit();
+                            }
+                            while (true) {
+                                const tok = (try tokenStream.next()) orelse return Error.UnexpectedToken;
+                                switch (tok) {
+                                    .End => break,
+                                    else => {},
+                                }
+                                try arraylist.ensureUnusedCapacity(1);
+                                const v = try parseInternal(ptrInfo.child, tok, tokenStream, slice, options);
+                                arraylist.appendAssumeCapacity(v);
+                            }
+                            return arraylist.toOwnedSlice();
                         },
                         else => return Error.UnexpectedToken,
                     }
@@ -249,6 +257,14 @@ test "tokenize" {
         try testing.expect(token.? == Token.ByteString);
         try testing.expectEqualStrings("spam", token.?.ByteString.slice(ts.slice));
     }
+    {
+        var ts = TokenStream.init("li1ee");
+        try testing.expect((try ts.next()).? == Token.ListBegin);
+        const token = try ts.next();
+        try testing.expect(token.? == Token.Integer);
+        try testing.expectEqualStrings("1", token.?.Integer.slice(ts.slice));
+        try testing.expect((try ts.next()).? == Token.End);
+    }
 }
 
 test "parsing" {
@@ -276,5 +292,12 @@ test "parsing" {
         const r = try parse([]const u8, "4:spam", .{ .allocator = testing.allocator });
         defer testing.allocator.free(r);
         try testing.expectEqualStrings("spam", r);
+    }
+    {
+        const r = try parse([]const u8, "li0ei255ee", .{ .allocator = testing.allocator });
+        defer testing.allocator.free(r);
+        try testing.expect(2 == r.len);
+        try testing.expect(0 == r[0]);
+        try testing.expect(255 == r[1]);
     }
 }
