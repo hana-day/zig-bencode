@@ -168,6 +168,28 @@ fn parseInternal(comptime T: type, token: Token, tokenStream: *TokenStream, slic
                     std.mem.copy(u8, &r, byteStringToken.slice(slice));
                     return r;
                 },
+                .ListBegin => {
+                    var r: T = undefined;
+                    var i: usize = 0;
+                    errdefer {
+                        if (r.len > 0) while (true) : (i -= 1) {
+                            if (i == r.len) continue;
+                            parseFree(arrayInfo.child, r[i], options);
+                            if (i == 0) break;
+                        };
+                    }
+                    while (i < r.len) : (i += 1) {
+                        const tok = (try tokenStream.next()) orelse return Error.UnexpectedEnd;
+                        r[i] = try parseInternal(arrayInfo.child, tok, tokenStream, slice, options);
+                    }
+                    const tok = (try tokenStream.next()) orelse return Error.UnexpectedEnd;
+                    switch (tok) {
+                        .End => {
+                            return r;
+                        },
+                        else => return Error.UnexpectedToken,
+                    }
+                },
                 else => return Error.UnexpectedToken,
             }
         },
@@ -194,7 +216,7 @@ fn parseInternal(comptime T: type, token: Token, tokenStream: *TokenStream, slic
                                 arraylist.deinit();
                             }
                             while (true) {
-                                const tok = (try tokenStream.next()) orelse return Error.UnexpectedToken;
+                                const tok = (try tokenStream.next()) orelse return Error.UnexpectedEnd;
                                 switch (tok) {
                                     .End => break,
                                     else => {},
@@ -267,31 +289,43 @@ test "tokenize" {
     }
 }
 
-test "parsing" {
-    {
-        try testing.expect(0 == (try parse(u8, "i0e", .{})));
-        try testing.expect(1 == (try parse(u8, "i1e", .{})));
-        try testing.expect(255 == (try parse(u8, "i255e", .{})));
-        try testing.expect(-1 == (try parse(i8, "i-1e", .{})));
-        try testing.expect(-127 == (try parse(i8, "i-127e", .{})));
+test "parsing integer" {
+    try testing.expect(0 == (try parse(u8, "i0e", .{})));
+    try testing.expect(1 == (try parse(u8, "i1e", .{})));
+    try testing.expect(255 == (try parse(u8, "i255e", .{})));
+    try testing.expect(-1 == (try parse(i8, "i-1e", .{})));
+    try testing.expect(-127 == (try parse(i8, "i-127e", .{})));
+}
 
-        try testing.expectError(Error.InvalidInteger, parse(u8, "ie", .{}));
-        try testing.expectError(Error.InvalidInteger, parse(u8, "i01e", .{}));
-        try testing.expectError(Error.InvalidInteger, parse(i8, "i-e", .{}));
-        try testing.expectError(Error.InvalidInteger, parse(i8, "i-0e", .{}));
-        try testing.expectError(Error.UnexpectedEnd, parse(u8, "i1", .{}));
-    }
+test "parsing invalid integer" {
+    try testing.expectError(Error.InvalidInteger, parse(u8, "ie", .{}));
+    try testing.expectError(Error.InvalidInteger, parse(u8, "i01e", .{}));
+    try testing.expectError(Error.InvalidInteger, parse(i8, "i-e", .{}));
+    try testing.expectError(Error.InvalidInteger, parse(i8, "i-0e", .{}));
+    try testing.expectError(Error.UnexpectedEnd, parse(u8, "i1", .{}));
+}
+
+test "parsing byte string" {
     {
         try testing.expectEqual([0]u8{}, (try parse([0]u8, "0:", .{})));
         try testing.expectEqual([4]u8{ 's', 'p', 'a', 'm' }, (try parse([4]u8, "4:spam", .{})));
-
-        try testing.expectError(Error.InvalidInteger, parse([4]u8, "01:spam", .{}));
-        try testing.expectError(Error.UnexpectedEnd, parse([4]u8, "1:", .{}));
     }
     {
         const r = try parse([]const u8, "4:spam", .{ .allocator = testing.allocator });
         defer testing.allocator.free(r);
         try testing.expectEqualStrings("spam", r);
+    }
+}
+
+test "parsing invalid byte string" {
+    try testing.expectError(Error.InvalidInteger, parse([4]u8, "01:spam", .{}));
+    try testing.expectError(Error.UnexpectedEnd, parse([4]u8, "1:", .{}));
+}
+
+test "parsing list" {
+    {
+        const r = try parse([]const u8, "le", .{ .allocator = testing.allocator });
+        defer testing.allocator.free(r);
     }
     {
         const r = try parse([]const u8, "li0ei255ee", .{ .allocator = testing.allocator });
@@ -300,4 +334,27 @@ test "parsing" {
         try testing.expect(0 == r[0]);
         try testing.expect(255 == r[1]);
     }
+    {
+        const r = try parse([][]const u8, "l4:spam3:egge", .{ .allocator = testing.allocator });
+        defer {
+            for (r) |child| {
+                testing.allocator.free(child);
+            }
+            testing.allocator.free(r);
+        }
+        try testing.expect(2 == r.len);
+        try testing.expectEqualStrings("spam", r[0]);
+        try testing.expectEqualStrings("egg", r[1]);
+    }
+    {
+        const r = try parse([2]u8, "li0ei255ee", .{});
+        try testing.expect(0 == r[0]);
+        try testing.expect(255 == r[1]);
+    }
+}
+
+test "parsing invalid list" {
+    try testing.expectError(Error.UnexpectedEnd, parse([2]u8, "l", .{}));
+    try testing.expectError(Error.UnexpectedEnd, parse([2]u8, "li", .{}));
+    try testing.expectError(Error.UnexpectedEnd, parse([2]u8, "li0ei255e", .{}));
 }
