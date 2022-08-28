@@ -258,6 +258,8 @@ fn parseInternal(comptime T: type, token: Token, tokenStream: *TokenStream, slic
                             const default = @ptrCast(*const field.field_type, default_ptr).*;
                             @field(r, field.name) = default;
                         }
+                    } else if (@typeInfo(field.field_type) == .Optional) {
+                        @field(r, field.name) = null;
                     } else {
                         return Error.MissingField;
                     }
@@ -305,7 +307,9 @@ fn parseInternal(comptime T: type, token: Token, tokenStream: *TokenStream, slic
                 else => @compileError("Unable to parse into type '" ++ @typeName(T) ++ "'"),
             }
         },
-
+        .Optional => |optionalInfo| {
+            return try parseInternal(optionalInfo.child, token, tokenStream, slice, options);
+        },
         else => @compileError("Unable to parse into type '" ++ @typeName(T) ++ "'"),
     }
 }
@@ -332,6 +336,11 @@ fn parseFree(comptime T: type, value: T, options: ParseOptions) void {
                     allocator.free(value);
                 },
                 else => unreachable,
+            }
+        },
+        .Optional => {
+            if (value) |v| {
+                return parseFree(@TypeOf(v), v, options);
             }
         },
         else => unreachable,
@@ -439,10 +448,12 @@ test "parsing invalid list" {
 }
 
 test "parsing dictionary" {
+    // Parse Empty struct
     {
         const Empty = struct {};
         _ = try parse(Empty, "de", .{});
     }
+    // Parse contents with all fields included.
     {
         const MyStruct = struct {
             foo: u8,
@@ -460,6 +471,7 @@ test "parsing dictionary" {
         try testing.expect(1 == r.baz[0]);
         try testing.expect(2 == r.baz[1]);
     }
+    // Parse contents with missing fields.
     {
         const MyStruct = struct {
             foo: u8,
@@ -471,6 +483,36 @@ test "parsing dictionary" {
         }
         try testing.expectEqualStrings("spam", r.bar);
         try testing.expect(42 == r.foo);
+    }
+    // Parse contents with optional fields.
+    {
+        const MyStruct = struct {
+            foo: ?u8,
+            bar: ?[]const u8,
+            baz: []u8,
+        };
+        const r = try parse(MyStruct, "d3:bar4:spam3:bazli1ei2eee", .{ .allocator = testing.allocator });
+        defer {
+            if (r.bar) |bar| {
+                testing.allocator.free(bar);
+            }
+            testing.allocator.free(r.baz);
+        }
+        try testing.expectEqualStrings("spam", r.bar.?);
+        try testing.expect(null == r.foo);
+        try testing.expect(2 == r.baz.len);
+        try testing.expect(1 == r.baz[0]);
+        try testing.expect(2 == r.baz[1]);
+    }
+    // Parse contents with default value.
+    {
+        const MyStruct = struct {
+            foo: u8,
+            bar: u8 = 2,
+        };
+        const r = try parse(MyStruct, "d3:fooi1ee", .{});
+        try testing.expect(1 == r.foo);
+        try testing.expect(2 == r.bar);
     }
 }
 
