@@ -41,6 +41,7 @@ const Token = union(enum) {
 const TokenStream = struct {
     i: usize = 0,
     slice: []const u8,
+    depth: usize = 0,
 
     pub fn init(slice: []const u8) TokenStream {
         return TokenStream{
@@ -59,21 +60,36 @@ const TokenStream = struct {
                     token = try self.nextByteString();
                 },
                 'l' => {
-                    token = Token{ .ListBegin = .{} };
+                    token = Token.ListBegin;
                     self.i += 1;
+                    self.depth += 1;
                 },
                 'd' => {
-                    token = Token{ .DictionaryBegin = .{} };
+                    token = Token.DictionaryBegin;
                     self.i += 1;
+                    self.depth += 1;
                 },
                 'e' => {
-                    token = Token{ .End = .{} };
+                    token = Token.End;
                     self.i += 1;
+                    self.depth -= 1;
                 },
                 else => return Error.UnexpectedCharacter,
             }
         }
         return token;
+    }
+
+    fn skipValue(self: *@This()) Error!void {
+        const original_depth = self.depth;
+
+        _ = try self.next();
+        if (self.depth < original_depth) return Error.UnexpectedEnd;
+        if (self.depth == original_depth) return;
+
+        while (try self.next()) |_| {
+            if (self.depth == original_depth) return;
+        }
     }
 
     fn readChar(self: *@This()) Error!u8 {
@@ -149,7 +165,7 @@ pub const ParseOptions = struct {
     allocator: ?std.mem.Allocator = null,
 };
 
-fn parse(comptime T: type, slice: []const u8, options: ParseOptions) Error!T {
+pub fn parse(comptime T: type, slice: []const u8, options: ParseOptions) Error!T {
     var tokenStream = TokenStream.init(slice);
     const token = (try tokenStream.next()) orelse return Error.UnexpectedEnd;
     const r = try parseInternal(T, token, &tokenStream, slice, options);
@@ -217,15 +233,22 @@ fn parseInternal(comptime T: type, token: Token, tokenStream: *TokenStream, slic
                     .End => break,
                     .ByteString => |byteStringToken| {
                         const key = byteStringToken.slice(slice);
+                        var found = false;
                         inline for (structInfo.fields) |field, i| {
                             if (std.mem.eql(u8, field.name, key)) {
                                 const tok2 = (try tokenStream.next()) orelse return Error.UnexpectedEnd;
                                 @field(r, field.name) = try parseInternal(field.field_type, tok2, tokenStream, slice, options);
                                 fields_seen[i] = true;
+                                found = true;
                             }
                         }
+                        if (!found) {
+                            try tokenStream.skipValue();
+                        }
                     },
-                    else => return Error.UnexpectedToken,
+                    else => {
+                        return Error.UnexpectedToken;
+                    },
                 }
             }
             inline for (structInfo.fields) |field, i| {
@@ -417,6 +440,10 @@ test "parsing invalid list" {
 
 test "parsing dictionary" {
     {
+        const Empty = struct {};
+        _ = try parse(Empty, "de", .{});
+    }
+    {
         const MyStruct = struct {
             foo: u8,
             bar: []const u8,
@@ -432,6 +459,18 @@ test "parsing dictionary" {
         try testing.expect(2 == r.baz.len);
         try testing.expect(1 == r.baz[0]);
         try testing.expect(2 == r.baz[1]);
+    }
+    {
+        const MyStruct = struct {
+            foo: u8,
+            bar: []const u8,
+        };
+        const r = try parse(MyStruct, "d3:bar4:spam3:fooi42e3:bazli1ei2eee", .{ .allocator = testing.allocator });
+        defer {
+            testing.allocator.free(r.bar);
+        }
+        try testing.expectEqualStrings("spam", r.bar);
+        try testing.expect(42 == r.foo);
     }
 }
 
